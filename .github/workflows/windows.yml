@@ -48,6 +48,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The TypeScript layer is pure logic (FSM, state, layout) and tests
+      # headlessly; catching a broken transition before the multi-minute
+      # Tauri build saves a whole CI round-trip.
+      - name: Unit tests (TypeScript)
+        run: npm test
+
+      # cargo test links the whole app, and tauri.conf.json bundles the hook
+      # binary as a resource — build it first, exactly like `prebuild` does.
+      - name: Unit tests (Rust)
+        run: |
+          cargo build --release -p coucou-hook
+          cargo test --lib
+
       # Three files carry the version and they drift silently. Publishing a
       # "0.1.1" that installs a 0.1.0 is the kind of thing nobody notices until
       # a bug report arrives against the wrong build.
