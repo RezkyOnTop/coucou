@@ -120,8 +120,50 @@ function hookName(event) {
     case "session.idle": return "Stop"
     case "session.error": return "StopFailure"
     case "session.deleted": return "SessionEnd"
+    case "permission.updated": return "PermissionRequest"
     default: return null
   }
+}
+
+/** Asks Coucou for a permission decision and resolves with the reply.
+ *  The relay holds the question open for up to its decision budget; if Coucou
+ *  is closed, or nobody answers in time, the relay prints nothing and this
+ *  resolves null — OpenCode's own terminal prompt then handles it, exactly
+ *  as if this plugin did not exist. */
+async function askCoucou(payload) {
+  const body = JSON.stringify(payload)
+  return await new Promise((resolve) => {
+    let child
+    try {
+      child = spawn(RELAY, ["--agent", AGENT, "PermissionRequest"], {
+        stdio: ["pipe", "pipe", "ignore"],
+        windowsHide: true,
+      })
+    } catch {
+      resolve(null)
+      return
+    }
+    let out = ""
+    const done = (v) => {
+      child.kill()
+      resolve(v)
+    }
+    child.on("error", () => resolve(null))
+    child.stdout.on("data", (chunk) => {
+      out += chunk
+      if (out.includes("\n")) {
+        const line = out.split("\n")[0].trim()
+        done(line === "" ? null : line)
+      }
+    })
+    child.on("close", () => resolve(out.trim() === "" ? null : out.trim()))
+    child.stdin.on("error", () => {})
+    child.stdin.write(body)
+    child.stdin.end()
+    // The relay's own budget is the real deadline; this one only guarantees
+    // the plugin never outlives it by much.
+    setTimeout(() => done(out.trim() === "" ? null : out.trim()), 115_000)
+  })
 }
 
 /** Sends one payload to the relay tagged with the mapped island event.
@@ -168,8 +210,36 @@ export const CoucouPlugin = async (ctx) => {
         cwd: ctx.directory,
       })
     },
+    "permission.ask": async (input, output) => {
+      // The declarative surface: when OpenCode calls this hook, Coucou is
+      // already showing the card and the relay is holding the question open.
+      // Nothing to set here — the reply arrives through the client below —
+      // but the hook must exist so OpenCode knows we want to be asked.
+      output.status = "ask"
+    },
     event: async ({ event }) => {
       const p = event.properties ?? {}
+      if (event.type === "permission.updated") {
+        // The card is up; hold the tool call until the island answers.
+        const decision = await askCoucou({
+          request_id: p.id,
+          session_id: p.sessionID,
+          tool_name: p.type ?? p.title,
+          tool_input: p.metadata ?? {},
+          cwd: ctx.directory,
+        })
+        if (decision === null) return // nobody answered: OpenCode's prompt takes over
+        const response = decision === "always" ? "always" : decision === "deny" ? "reject" : "once"
+        try {
+          await ctx.client.postSessionIdPermissionsPermissionId({
+            path: { id: p.sessionID, permissionID: p.id },
+            body: { response },
+          })
+        } catch {
+          // The request was answered or timed out elsewhere; nothing to do.
+        }
+        return
+      }
       forward(event.type, {
         // message is what Notification/Stop read; sessions carry an id.
         message: typeof p.error === "string" ? p.error : undefined,
@@ -425,6 +495,7 @@ mod tests {
             "Stop",
             "StopFailure",
             "SessionEnd",
+            "PermissionRequest",
         ];
         for line in src.lines() {
             let Some(idx) = line.find("return \"") else {

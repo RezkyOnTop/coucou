@@ -80,6 +80,14 @@ gets its own pill in the island: tool calls scroll as steps, an error sets the
 pill red, a finished session shows what it did. Nothing is written to any other
 file in that folder, and uninstall removes only `coucou.js`.
 
+**Permissions can be answered from the island.** When OpenCode asks for
+permission (`permission.updated`), the plugin holds the tool call and the
+island opens the familiar **Deny / Allow** card on the OpenCode pill. Your
+answer goes back through the relay to the plugin, which replies to OpenCode
+(`once` / `always` / `reject`). If Coucou is closed, paused, or nobody answers
+in time, the plugin stays silent and OpenCode's own terminal prompt handles
+it — a session is never blocked.
+
 ## Chat and keys
 
 **Settings… → Claude** takes your Anthropic API key. Keys live in the **Windows
