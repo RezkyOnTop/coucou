@@ -222,13 +222,27 @@ pub async fn poll_once(app: AppHandle, id: &str) {
     // The one-shot path ignores the outcome: the user asked for a refresh,
     // so the result (or error) lands in the island either way.
     match id {
-        "integration_stripe" => { poll_stripe(app).await; }
-        "integration_github" => { poll_github(app).await; }
-        "integration_vercel" => { poll_vercel(app).await; }
-        "integration_n8n" => { poll_n8n(app).await; }
-        "integration_resend" => { poll_resend(app).await; }
-        "integration_notion" => { poll_notion(app).await; }
-        "integration_calcom" => { poll_calcom(app).await; }
+        "integration_stripe" => {
+            poll_stripe(app).await;
+        }
+        "integration_github" => {
+            poll_github(app).await;
+        }
+        "integration_vercel" => {
+            poll_vercel(app).await;
+        }
+        "integration_n8n" => {
+            poll_n8n(app).await;
+        }
+        "integration_resend" => {
+            poll_resend(app).await;
+        }
+        "integration_notion" => {
+            poll_notion(app).await;
+        }
+        "integration_calcom" => {
+            poll_calcom(app).await;
+        }
         _ => {}
     }
 }
@@ -261,8 +275,13 @@ fn status_error(code: u16, unauthorised_hint: &str) -> String {
 
 async fn poll_stripe(app: AppHandle) -> PollOutcome {
     // Not configured: no request was made, so neither success nor failure.
-    let Some(key) = secrets::get("stripe-api-key") else { return PollOutcome::Ok };
-    let auth = format!("Basic {}", crate::claude::base64_for(format!("{key}:").as_bytes()));
+    let Some(key) = secrets::get("stripe-api-key") else {
+        return PollOutcome::Ok;
+    };
+    let auth = format!(
+        "Basic {}",
+        crate::claude::base64_for(format!("{key}:").as_bytes())
+    );
     let http = client();
 
     let balance = http
@@ -294,21 +313,30 @@ async fn poll_stripe(app: AppHandle) -> PollOutcome {
         }
         Ok(r) => {
             let code = r.status().as_u16();
-            emit(&app, IntegrationUpdate {
-                id: "integration_stripe",
-                data: json!({}),
-                error: Some(status_error(code, "Use a secret key (sk_live_… not pk_live_…)")),
-                event: None,
-            });
+            emit(
+                &app,
+                IntegrationUpdate {
+                    id: "integration_stripe",
+                    data: json!({}),
+                    error: Some(status_error(
+                        code,
+                        "Use a secret key (sk_live_… not pk_live_…)",
+                    )),
+                    event: None,
+                },
+            );
             return PollOutcome::Malformed;
         }
         Err(e) => {
-            emit(&app, IntegrationUpdate {
-                id: "integration_stripe",
-                data: json!({}),
-                error: Some(format!("No connection: {e}")),
-                event: None,
-            });
+            emit(
+                &app,
+                IntegrationUpdate {
+                    id: "integration_stripe",
+                    data: json!({}),
+                    error: Some(format!("No connection: {e}")),
+                    event: None,
+                },
+            );
             return PollOutcome::Unreachable;
         }
     };
@@ -318,7 +346,9 @@ async fn poll_stripe(app: AppHandle) -> PollOutcome {
         .header("Authorization", &auth)
         .send()
         .await;
-    let Ok(response) = charges else { return PollOutcome::Unreachable };
+    let Ok(response) = charges else {
+        return PollOutcome::Unreachable;
+    };
     if !response.status().is_success() {
         // The balance already landed; the payment list is supplementary, so a
         // bad second call is not worth an error card — but not a clean cycle.
@@ -367,20 +397,30 @@ async fn poll_stripe(app: AppHandle) -> PollOutcome {
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| {
-                let cents = payments[0].get("amount").and_then(Value::as_i64).unwrap_or(0);
+                let cents = payments[0]
+                    .get("amount")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
                 format!("{:.2}", cents as f64 / 100.0)
             });
-        Some(IntegrationEvent { success: true, label, detail: None })
+        Some(IntegrationEvent {
+            success: true,
+            label,
+            detail: None,
+        })
     } else {
         None
     };
 
-    emit(&app, IntegrationUpdate {
-        id: "integration_stripe",
-        data: json!({ "balance": amount, "currency": currency, "payments": payments }),
-        error: None,
-        event,
-    });
+    emit(
+        &app,
+        IntegrationUpdate {
+            id: "integration_stripe",
+            data: json!({ "balance": amount, "currency": currency, "payments": payments }),
+            error: None,
+            event,
+        },
+    );
     PollOutcome::Ok
 }
 
@@ -388,7 +428,9 @@ async fn poll_stripe(app: AppHandle) -> PollOutcome {
 
 async fn poll_github(app: AppHandle) -> PollOutcome {
     // Not configured: no request was made, so neither success nor failure.
-    let Some(token) = secrets::get("github-token") else { return PollOutcome::Ok };
+    let Some(token) = secrets::get("github-token") else {
+        return PollOutcome::Ok;
+    };
     let http = client();
 
     let user = http
@@ -398,18 +440,29 @@ async fn poll_github(app: AppHandle) -> PollOutcome {
         .header("User-Agent", "Coucou")
         .send()
         .await;
-    let Ok(response) = user else { return PollOutcome::Unreachable };
+    let Ok(response) = user else {
+        return PollOutcome::Unreachable;
+    };
     if !response.status().is_success() {
-        emit(&app, IntegrationUpdate {
-            id: "integration_github",
-            data: json!({}),
-            error: Some(status_error(response.status().as_u16(), "Token lacks the needed scope")),
-            event: None,
-        });
+        emit(
+            &app,
+            IntegrationUpdate {
+                id: "integration_github",
+                data: json!({}),
+                error: Some(status_error(
+                    response.status().as_u16(),
+                    "Token lacks the needed scope",
+                )),
+                event: None,
+            },
+        );
         return PollOutcome::Malformed;
     }
     let json: Value = response.json().await.unwrap_or(json!({}));
-    let public = json.get("public_repos").and_then(Value::as_i64).unwrap_or(0);
+    let public = json
+        .get("public_repos")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     let private = json
         .get("owned_private_repos")
         .or_else(|| json.get("total_private_repos"))
@@ -438,12 +491,15 @@ async fn poll_github(app: AppHandle) -> PollOutcome {
         _ => 0,
     };
 
-    emit(&app, IntegrationUpdate {
-        id: "integration_github",
-        data: json!({ "totalRepos": public + private, "totalStars": stars }),
-        error: None,
-        event: None,
-    });
+    emit(
+        &app,
+        IntegrationUpdate {
+            id: "integration_github",
+            data: json!({ "totalRepos": public + private, "totalStars": stars }),
+            error: None,
+            event: None,
+        },
+    );
     PollOutcome::Ok
 }
 
@@ -451,21 +507,31 @@ async fn poll_github(app: AppHandle) -> PollOutcome {
 
 async fn poll_vercel(app: AppHandle) -> PollOutcome {
     // Not configured: no request was made, so neither success nor failure.
-    let Some(token) = secrets::get("vercel-token") else { return PollOutcome::Ok };
+    let Some(token) = secrets::get("vercel-token") else {
+        return PollOutcome::Ok;
+    };
     let response = client()
         .get("https://api.vercel.com/v6/deployments?limit=5")
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/json")
         .send()
         .await;
-    let Ok(response) = response else { return PollOutcome::Unreachable };
+    let Ok(response) = response else {
+        return PollOutcome::Unreachable;
+    };
     if !response.status().is_success() {
-        emit(&app, IntegrationUpdate {
-            id: "integration_vercel",
-            data: json!({}),
-            error: Some(status_error(response.status().as_u16(), "Token lacks access")),
-            event: None,
-        });
+        emit(
+            &app,
+            IntegrationUpdate {
+                id: "integration_vercel",
+                data: json!({}),
+                error: Some(status_error(
+                    response.status().as_u16(),
+                    "Token lacks access",
+                )),
+                event: None,
+            },
+        );
         return PollOutcome::Malformed;
     }
     let json: Value = response.json().await.unwrap_or(json!({}));
@@ -512,12 +578,15 @@ async fn poll_vercel(app: AppHandle) -> PollOutcome {
         })
     });
 
-    emit(&app, IntegrationUpdate {
-        id: "integration_vercel",
-        data: json!({ "deployments": deployments }),
-        error: None,
-        event,
-    });
+    emit(
+        &app,
+        IntegrationUpdate {
+            id: "integration_vercel",
+            data: json!({ "deployments": deployments }),
+            error: None,
+            event,
+        },
+    );
     PollOutcome::Ok
 }
 
@@ -525,21 +594,28 @@ async fn poll_vercel(app: AppHandle) -> PollOutcome {
 
 async fn poll_resend(app: AppHandle) -> PollOutcome {
     // Not configured: no request was made, so neither success nor failure.
-    let Some(key) = secrets::get("resend-api-key") else { return PollOutcome::Ok };
+    let Some(key) = secrets::get("resend-api-key") else {
+        return PollOutcome::Ok;
+    };
     let response = client()
         .get("https://api.resend.com/emails?limit=100")
         .header("Authorization", format!("Bearer {key}"))
         .header("Accept", "application/json")
         .send()
         .await;
-    let Ok(response) = response else { return PollOutcome::Unreachable };
+    let Ok(response) = response else {
+        return PollOutcome::Unreachable;
+    };
     if !response.status().is_success() {
-        emit(&app, IntegrationUpdate {
-            id: "integration_resend",
-            data: json!({}),
-            error: Some(status_error(response.status().as_u16(), "Key lacks access")),
-            event: None,
-        });
+        emit(
+            &app,
+            IntegrationUpdate {
+                id: "integration_resend",
+                data: json!({}),
+                error: Some(status_error(response.status().as_u16(), "Key lacks access")),
+                event: None,
+            },
+        );
         return PollOutcome::Malformed;
     }
     let json: Value = response.json().await.unwrap_or(json!({}));
@@ -571,12 +647,15 @@ async fn poll_resend(app: AppHandle) -> PollOutcome {
         })
         .unwrap_or_default();
 
-    emit(&app, IntegrationUpdate {
-        id: "integration_resend",
-        data: json!({ "emails": emails, "total": total }),
-        error: None,
-        event: None,
-    });
+    emit(
+        &app,
+        IntegrationUpdate {
+            id: "integration_resend",
+            data: json!({ "emails": emails, "total": total }),
+            error: None,
+            event: None,
+        },
+    );
     PollOutcome::Ok
 }
 
@@ -584,7 +663,9 @@ async fn poll_resend(app: AppHandle) -> PollOutcome {
 
 async fn poll_notion(app: AppHandle) -> PollOutcome {
     // Not configured: no request was made, so neither success nor failure.
-    let Some(token) = secrets::get("notion-api-key") else { return PollOutcome::Ok };
+    let Some(token) = secrets::get("notion-api-key") else {
+        return PollOutcome::Ok;
+    };
     let response = client()
         .post("https://api.notion.com/v1/search")
         .header("Authorization", format!("Bearer {token}"))
@@ -596,14 +677,22 @@ async fn poll_notion(app: AppHandle) -> PollOutcome {
         }))
         .send()
         .await;
-    let Ok(response) = response else { return PollOutcome::Unreachable };
+    let Ok(response) = response else {
+        return PollOutcome::Unreachable;
+    };
     if !response.status().is_success() {
-        emit(&app, IntegrationUpdate {
-            id: "integration_notion",
-            data: json!({}),
-            error: Some(status_error(response.status().as_u16(), "Integration lacks access")),
-            event: None,
-        });
+        emit(
+            &app,
+            IntegrationUpdate {
+                id: "integration_notion",
+                data: json!({}),
+                error: Some(status_error(
+                    response.status().as_u16(),
+                    "Integration lacks access",
+                )),
+                event: None,
+            },
+        );
         return PollOutcome::Malformed;
     }
     let json: Value = response.json().await.unwrap_or(json!({}));
@@ -613,12 +702,15 @@ async fn poll_notion(app: AppHandle) -> PollOutcome {
         .map(|list| list.iter().filter_map(parse_notion_page).collect())
         .unwrap_or_default();
 
-    emit(&app, IntegrationUpdate {
-        id: "integration_notion",
-        data: json!({ "pages": pages }),
-        error: None,
-        event: None,
-    });
+    emit(
+        &app,
+        IntegrationUpdate {
+            id: "integration_notion",
+            data: json!({ "pages": pages }),
+            error: None,
+            event: None,
+        },
+    );
     PollOutcome::Ok
 }
 
@@ -678,21 +770,28 @@ fn parse_notion_page(obj: &Value) -> Option<Value> {
 
 async fn poll_calcom(app: AppHandle) -> PollOutcome {
     // Not configured: no request was made, so neither success nor failure.
-    let Some(key) = secrets::get("calcom-api-key") else { return PollOutcome::Ok };
+    let Some(key) = secrets::get("calcom-api-key") else {
+        return PollOutcome::Ok;
+    };
     let response = client()
         .get("https://api.cal.com/v2/bookings?status=upcoming")
         .header("Authorization", format!("Bearer {key}"))
         .header("cal-api-version", "2024-08-13")
         .send()
         .await;
-    let Ok(response) = response else { return PollOutcome::Unreachable };
+    let Ok(response) = response else {
+        return PollOutcome::Unreachable;
+    };
     if !response.status().is_success() {
-        emit(&app, IntegrationUpdate {
-            id: "integration_calcom",
-            data: json!({}),
-            error: Some(status_error(response.status().as_u16(), "Key lacks access")),
-            event: None,
-        });
+        emit(
+            &app,
+            IntegrationUpdate {
+                id: "integration_calcom",
+                data: json!({}),
+                error: Some(status_error(response.status().as_u16(), "Key lacks access")),
+                event: None,
+            },
+        );
         return PollOutcome::Malformed;
     }
     let json: Value = response.json().await.unwrap_or(json!({}));
@@ -728,12 +827,15 @@ async fn poll_calcom(app: AppHandle) -> PollOutcome {
         })
         .unwrap_or_default();
 
-    emit(&app, IntegrationUpdate {
-        id: "integration_calcom",
-        data: json!({ "bookings": bookings }),
-        error: None,
-        event: None,
-    });
+    emit(
+        &app,
+        IntegrationUpdate {
+            id: "integration_calcom",
+            data: json!({ "bookings": bookings }),
+            error: None,
+            event: None,
+        },
+    );
     PollOutcome::Ok
 }
 
@@ -756,7 +858,12 @@ async fn poll_n8n(app: AppHandle) -> PollOutcome {
     let mut items: Option<Vec<Value>> = None;
     let mut unreachable = true;
     for url in &list_urls {
-        let response = http.get(url).header("X-N8N-API-KEY", &key).header("Accept", "application/json").send().await;
+        let response = http
+            .get(url)
+            .header("X-N8N-API-KEY", &key)
+            .header("Accept", "application/json")
+            .send()
+            .await;
         let Ok(response) = response else {
             continue;
         };
@@ -766,7 +873,9 @@ async fn poll_n8n(app: AppHandle) -> PollOutcome {
             log::line(format!("n8n list HTTP {}", response.status()));
             continue;
         }
-        let Ok(json) = response.json::<Value>().await else { continue };
+        let Ok(json) = response.json::<Value>().await else {
+            continue;
+        };
         items = match &json {
             Value::Object(o) => o.get("data").and_then(Value::as_array).cloned(),
             Value::Array(a) => Some(a.clone()),
@@ -778,7 +887,11 @@ async fn poll_n8n(app: AppHandle) -> PollOutcome {
     }
 
     let Some(first) = items.and_then(|list| list.into_iter().next()) else {
-        return if unreachable { PollOutcome::Unreachable } else { PollOutcome::Malformed };
+        return if unreachable {
+            PollOutcome::Unreachable
+        } else {
+            PollOutcome::Malformed
+        };
     };
     let id = match first.get("id") {
         Some(Value::String(s)) => s.clone(),
@@ -804,14 +917,21 @@ async fn poll_n8n(app: AppHandle) -> PollOutcome {
     let mut name = "Workflow".to_string();
     let mut detail = None;
     for url in &detail_urls {
-        let Ok(response) = http.get(url).header("X-N8N-API-KEY", &key).header("Accept", "application/json").send().await
+        let Ok(response) = http
+            .get(url)
+            .header("X-N8N-API-KEY", &key)
+            .header("Accept", "application/json")
+            .send()
+            .await
         else {
             continue;
         };
         if !response.status().is_success() {
             continue;
         }
-        let Ok(json) = response.json::<Value>().await else { continue };
+        let Ok(json) = response.json::<Value>().await else {
+            continue;
+        };
         name = json
             .get("workflowData")
             .and_then(|w| w.get("name"))
@@ -824,12 +944,19 @@ async fn poll_n8n(app: AppHandle) -> PollOutcome {
     }
 
     log::line(format!("n8n execution {id} {status} · {name}"));
-    emit(&app, IntegrationUpdate {
-        id: "integration_n8n",
-        data: json!({ "workflow": name, "status": status }),
-        error: None,
-        event: Some(IntegrationEvent { success, label: name, detail }),
-    });
+    emit(
+        &app,
+        IntegrationUpdate {
+            id: "integration_n8n",
+            data: json!({ "workflow": name, "status": status }),
+            error: None,
+            event: Some(IntegrationEvent {
+                success,
+                label: name,
+                detail,
+            }),
+        },
+    );
     PollOutcome::Ok
 }
 
@@ -838,7 +965,11 @@ fn n8n_detail(json: &Value, success: bool) -> Option<String> {
     if !success {
         if let Some(error) = result.get("error") {
             let message = error.get("message").and_then(Value::as_str).unwrap_or("");
-            if let Some(node) = error.get("node").and_then(|n| n.get("name")).and_then(Value::as_str) {
+            if let Some(node) = error
+                .get("node")
+                .and_then(|n| n.get("name"))
+                .and_then(Value::as_str)
+            {
                 if !node.is_empty() {
                     return Some(format!("{node}\n{message}"));
                 }
@@ -872,7 +1003,10 @@ fn n8n_detail(json: &Value, success: bool) -> Option<String> {
         .first()?
         .as_array()?;
     let count = items.len();
-    let header = format!("→ {last_node} · {count} item{}", if count == 1 { "" } else { "s" });
+    let header = format!(
+        "→ {last_node} · {count} item{}",
+        if count == 1 { "" } else { "s" }
+    );
 
     let fields = items
         .first()
