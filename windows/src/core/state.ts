@@ -110,7 +110,7 @@ export const DEFAULT_SETTINGS: Settings = {
 
 type Listener = () => void;
 
-class AppState {
+export class AppState {
   mode: IslandMode = "hidden";
   view: IslandViewName = "overview";
 
