@@ -90,6 +90,14 @@ it — a session is never blocked.
 
 ## Chat and keys
 
+**Toasts.** When a permission request arrives while the island is hidden or
+another app has your attention, Coucou also shows a native Windows toast with
+**Allow / Deny** buttons — answer without opening the island at all. Both
+surfaces answer the same request; whichever you reach first wins. (The toast
+currently carries the PowerShell AppUserModelID, so it wears PowerShell's
+icon — Coucou gets its own once the installer is signed. Answering from the
+island does not remove the toast; a later button click is safely ignored.)
+
 **Settings… → Claude** takes your Anthropic API key. Keys live in the **Windows
 Credential Manager**, never on disk and never in the interface — the island can
 only ask whether a key exists. Same for every integration key.

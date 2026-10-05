@@ -32,6 +32,7 @@ use tokio::sync::mpsc;
 
 use crate::island::WINDOW_LABEL;
 use crate::log;
+use crate::toast;
 
 /// Slightly under coucou-hook's own 110 s wait, so we always answer first.
 const DECISION_TIMEOUT: Duration = Duration::from_secs(108);
@@ -218,6 +219,21 @@ async fn handle(app: AppHandle, mut pipe: impl Relay) {
     }
     payload["request_id"] = json!(id);
     log::line(format!("hook PermissionRequest id={id}"));
+    // The toast is the notification for when the island is hidden or another
+    // app has focus; the island card stays the primary surface. Both answer
+    // the same request id, so whichever the user reaches first wins and the
+    // other is a logged no-op.
+    toast::approval(
+        app.clone(),
+        id.clone(),
+        &agent_display_name(&payload),
+        payload.get("tool_name").and_then(Value::as_str).unwrap_or("Tool"),
+        &payload
+            .get("tool_input")
+            .and_then(Value::as_object)
+            .map(command_summary)
+            .unwrap_or_default(),
+    );
     let _ = app.emit_to(WINDOW_LABEL, "hook", payload);
 
     let decision = wait_for_decision(&id, &mut rx).await;
@@ -230,6 +246,28 @@ async fn handle(app: AppHandle, mut pipe: impl Relay) {
         let _ = pipe.flush().await;
     }
     pipe.finish();
+}
+
+/// "Claude Code" for untagged payloads, the agent's display name otherwise.
+fn agent_display_name(payload: &Value) -> String {
+    match payload.get("coucou_agent").and_then(Value::as_str) {
+        Some("opencode") => "OpenCode".to_string(),
+        Some(other) => other.to_string(),
+        None => "Claude Code".to_string(),
+    }
+}
+
+/// The most identifying string in the tool input, mirroring the island's
+/// APPROVAL_FIELDS order (command, then file paths, then url/query/pattern).
+fn command_summary(input: &serde_json::Map<String, Value>) -> String {
+    for field in ["command", "file_path", "path", "url", "query", "pattern"] {
+        if let Some(Value::String(s)) = input.get(field) {
+            if !s.trim().is_empty() {
+                return s.chars().take(120).collect();
+            }
+        }
+    }
+    String::new()
 }
 
 /// Two waits: a short one for "the card is up", then the long one for a human.

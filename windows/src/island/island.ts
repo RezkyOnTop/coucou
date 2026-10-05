@@ -140,11 +140,16 @@ export class Island {
         if (!req) return;
         Sound.play(d === "deny" ? "blip" : "approve");
         void Bridge.approvalDecision(req.requestId, d);
+        // Reset whichever pill owns the approval: Claude Code by default,
+        // agent_opencode when the request came from the OpenCode plugin.
+        const owner = State.tasks.find((t) => t.pillBadge === "approval")
+          ?? State.tasks.find((t) => t.state === "approval");
+        const ownerPath = owner?.id ?? "integration_claude";
         State.pendingApproval = null;
         State.isPinned = false;
         this.fsm.pinned = false;
-        State.updateTask("integration_claude", "working");
-        State.setPillBadge("integration_claude", null);
+        State.updateTask(ownerPath, "working");
+        State.setPillBadge(ownerPath, null);
         this.setView(State.defaultView());
       },
       toggleSound: () => {

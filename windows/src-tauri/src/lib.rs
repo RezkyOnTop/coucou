@@ -11,6 +11,7 @@ mod pipe;
 mod platform;
 mod secrets;
 mod settings;
+mod toast;
 mod tray;
 
 use std::process::Command;
