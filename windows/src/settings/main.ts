@@ -3,7 +3,7 @@
 // integrations land here too in a later stage.
 
 import "./settings.css";
-import { Bridge, onEvent, type HookStatus } from "../core/bridge";
+import { Bridge, onEvent, type HookStatus, type OpenCodeStatus, type OpenCodePreview } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
 import { h, clear } from "../views/dom";
 
@@ -154,6 +154,132 @@ function claudeSection(status: HookStatus): HTMLElement {
         body.append(h("div", {
           class: "notice ok",
           text: `Done. Previous settings saved as ${backup}. Open a new Claude Code session to pick the hooks up.`,
+        }));
+        window.setTimeout(() => void rebuild(), 2600);
+      } catch (err) {
+        confirm.disabled = false;
+        body.append(h("div", { class: "notice err", text: `Could not write: ${String(err)}` }));
+      }
+    });
+    body.append(h("div", { class: "row" }, confirm, h("button", {
+      text: "Cancel",
+      onclick: () => { clear(body); draw(); },
+    })));
+  }
+
+  draw();
+  return section;
+}
+
+// ── OpenCode section ──────────────────────────────────────────────────────────
+
+function opencodeSection(status: OpenCodeStatus): HTMLElement {
+  const body = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
+  const section = h(
+    "section",
+    {},
+    h("h2", {}, statusDot(status.installed), h("span", { text: "OpenCode" })),
+    body,
+  );
+
+  const rebuild = async () => {
+    const fresh = await Bridge.opencodeStatus();
+    if (fresh) Object.assign(status, fresh);
+    clear(body);
+    draw();
+    const head = section.querySelector("h2")!;
+    clear(head);
+    head.append(statusDot(status.installed), h("span", { text: "OpenCode" }));
+  };
+
+  function draw() {
+    body.append(
+      h("div", {
+        class: "hint",
+        text: status.installed
+          ? "Coucou forwards OpenCode sessions to the island: tool calls, errors and completions get a pill of their own."
+          : "Install the Coucou plugin to see OpenCode sessions in the island. OpenCode loads it from its plugin folder at startup.",
+      }),
+      h("div", { class: "row" },
+        h("label", { text: "Plugin" }),
+        h("span", { class: "path", text: status.pluginPath }),
+      ),
+      h("div", { class: "row" },
+        h("label", { text: "Relay" }),
+        h("span", { class: "path", text: "coucou-hook" }),
+        statusDot(status.hookReady),
+      ),
+    );
+
+    if (!status.hookReady) {
+      body.append(h("div", {
+        class: "notice warn",
+        text: "coucou-hook.exe is not in place yet. Restart Coucou before installing the plugin.",
+      }));
+    }
+
+    const actions = h("div", { class: "row" });
+    const install = h("button", {
+      class: "primary",
+      text: status.installed ? "Reinstall plugin…" : "Install plugin…",
+      onclick: () => showPreview(true),
+    });
+    // A plugin spawning a relay that isn't there does nothing at best.
+    if (!status.hookReady) {
+      install.disabled = true;
+      install.title = "The relay isn't installed yet.";
+    }
+    actions.append(install);
+    if (status.installed) {
+      actions.append(h("button", {
+        class: "danger",
+        text: "Uninstall plugin…",
+        onclick: () => showPreview(false),
+      }));
+    }
+    body.append(actions);
+  }
+
+  async function showPreview(install: boolean) {
+    let preview: OpenCodePreview;
+    try {
+      preview = await Bridge.opencodePreview(install);
+    } catch (err) {
+      clear(body);
+      body.append(
+        h("div", { class: "notice err", text: String(err).replace(/^Error:\s*/, "") }),
+        h("div", { class: "row" }, h("button", {
+          text: "Back",
+          onclick: () => { clear(body); draw(); },
+        })),
+      );
+      return;
+    }
+    clear(body);
+    body.append(
+      h("div", {
+        class: "hint",
+        text: install
+          ? "This is the plugin that will be written. Only Coucou's own file is touched."
+          : "This removes Coucou's plugin file only. Other files in the folder are left untouched.",
+      }),
+      renderDiff(preview.diff),
+      h("div", { class: "row" },
+        h("span", { class: "path", text: `Backup → ${preview.backup}` }),
+      ),
+    );
+    const confirm = h("button", {
+      class: install ? "primary" : "danger",
+      text: install ? "Back up and write" : "Back up and remove",
+    });
+    confirm.addEventListener("click", async () => {
+      confirm.disabled = true;
+      try {
+        const backup = await Bridge.opencodeApply(install, preview.fingerprint);
+        clear(body);
+        body.append(h("div", {
+          class: "notice ok",
+          text: `Done. Previous plugin saved as ${backup}. Start a new OpenCode session to pick it up.`,
         }));
         window.setTimeout(() => void rebuild(), 2600);
       } catch (err) {
@@ -428,6 +554,9 @@ async function main() {
   const status = (await Bridge.hooksStatus()) ?? {
     installed: false, settingsPath: "", hookPath: "", hookReady: false,
   };
+  const opencode = (await Bridge.opencodeStatus()) ?? {
+    installed: false, configDir: "", pluginPath: "", hookReady: false, appDetected: false,
+  };
 
   const hasKey = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
 
@@ -442,6 +571,7 @@ async function main() {
   root.append(
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
+    opencodeSection(opencode),
     apiSection(hasKey),
     integrationsSection(present),
     generalSection(),

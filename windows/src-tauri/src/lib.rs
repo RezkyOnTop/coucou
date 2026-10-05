@@ -6,6 +6,7 @@ mod hooks;
 mod integrations;
 mod island;
 mod log;
+mod opencode;
 mod pipe;
 mod platform;
 mod secrets;
@@ -18,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use claude::{Chat, ChatContext, ChatReply};
 use files::DroppedFile;
@@ -73,7 +74,11 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     }
     if autostart_changed {
         let manager = app.autolaunch();
-        let result = if settings.autostart { manager.enable() } else { manager.disable() };
+        let result = if settings.autostart {
+            manager.enable()
+        } else {
+            manager.disable()
+        };
         if let Err(err) = result {
             eprintln!("[coucou] autostart: {err}");
         }
@@ -101,7 +106,12 @@ fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool) {
 /// The front end pushes the island shape; Rust decides click-through from it.
 #[tauri::command]
 fn set_island_rect(app: AppHandle, shared: State<Shared>, x: f64, y: f64, width: f64, height: f64) {
-    shared.gate.set_rect(island::IslandRect { x, y, w: width, h: height });
+    shared.gate.set_rect(island::IslandRect {
+        x,
+        y,
+        w: width,
+        h: height,
+    });
     // Without the cursor poll the input region is the click-through: it follows the island.
     if !platform::CURSOR_POLL {
         island::refresh_click_through(&app, &shared.gate);
@@ -110,7 +120,9 @@ fn set_island_rect(app: AppHandle, shared: State<Shared>, x: f64, y: f64, width:
 
 #[tauri::command]
 fn focus_window(app: AppHandle, focused: bool) {
-    let Some(win) = island::window(&app) else { return };
+    let Some(win) = island::window(&app) else {
+        return;
+    };
     platform::set_activating(&win, focused);
     if focused {
         let _ = win.set_focus();
@@ -229,6 +241,23 @@ fn approval_ack(app: AppHandle, request_id: String) {
 #[tauri::command]
 fn approval_decline(app: AppHandle, request_id: String) {
     pipe::decline(&app, &request_id);
+}
+
+// ── OpenCode plugin ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn opencode_status() -> opencode::OpenCodeStatus {
+    opencode::status()
+}
+
+#[tauri::command]
+fn opencode_preview(install: bool) -> Result<opencode::OpenCodePreview, String> {
+    opencode::preview(install)
+}
+
+#[tauri::command]
+fn opencode_apply(install: bool, fingerprint: String) -> Result<String, String> {
+    opencode::write(install, &fingerprint)
 }
 
 // ── Chat, files and secrets ───────────────────────────────────────────────────
@@ -367,7 +396,10 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             let _ = app.emit_to(island::WINDOW_LABEL, "tray", "open".to_string());
         }))
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(Shared {
             settings: Mutex::new(loaded.clone()),
             gate: gate.clone(),
@@ -387,6 +419,9 @@ pub fn run() {
             hooks_status,
             hooks_preview,
             hooks_apply,
+            opencode_status,
+            opencode_preview,
+            opencode_apply,
             approval_decision,
             approval_ack,
             approval_decline,
@@ -422,7 +457,10 @@ pub fn run() {
             gate.set_active(true);
             island::spawn_cursor_poll(handle.clone(), gate.clone());
 
-            log::line(format!("--- Coucou {} started ---", env!("CARGO_PKG_VERSION")));
+            log::line(format!(
+                "--- Coucou {} started ---",
+                env!("CARGO_PKG_VERSION")
+            ));
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
             integrations::start(handle.clone());

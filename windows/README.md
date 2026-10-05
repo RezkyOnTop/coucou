@@ -68,6 +68,18 @@ in time, Coucou stays quiet and Claude Code asks in the terminal as usual.
 
 It works from any terminal — Windows Terminal, PowerShell, VS Code, Git Bash.
 
+## OpenCode
+
+Open **Settings… → OpenCode → Install plugin…**. OpenCode has no command hooks;
+it loads JavaScript plugins from `%USERPROFILE%\.config\opencode\plugins\`, so
+Coucou writes one file there — `coucou.js` — with the same preview-before-write,
+dated-backup flow as the Claude Code hooks. The plugin forwards OpenCode's
+`tool.execute.before/after` and session events to the very same
+`coucou-hook.exe` relay, tagged `--agent opencode`, so every OpenCode session
+gets its own pill in the island: tool calls scroll as steps, an error sets the
+pill red, a finished session shows what it did. Nothing is written to any other
+file in that folder, and uninstall removes only `coucou.js`.
+
 ## Chat and keys
 
 **Settings… → Claude** takes your Anthropic API key. Keys live in the **Windows

@@ -80,6 +80,15 @@ export const Bridge = {
   /** "Nobody can act on this" — Claude Code asks in the terminal right away. */
   approvalDecline: (requestId: string) => call<void>("approval_decline", { requestId }),
 
+  // ── OpenCode plugin ──────────────────────────────────────────────────────
+  opencodeStatus: () => call<OpenCodeStatus>("opencode_status"),
+  /** The plugin file to show before anything is written. install: false previews removal. */
+  opencodePreview: (install: boolean) =>
+    callOrThrow<OpenCodePreview>("opencode_preview", { install }),
+  /** Writes ~/.config/opencode/plugins/coucou.js — only after an explicit click. */
+  opencodeApply: (install: boolean, fingerprint: string) =>
+    callOrThrow<string>("opencode_apply", { install, fingerprint }),
+
   // ── Chat, files, secrets ──────────────────────────────────────────────────
   /** One chat turn. The API key and any file bytes never leave Rust. */
   chatSend: (query: string, context: ChatContext | null) =>
@@ -130,6 +139,21 @@ export interface HookPreview {
   backup: string;
   settingsPath: string;
   /** Hand back to hooksApply so only the reviewed diff is ever written. */
+  fingerprint: string;
+}
+
+export interface OpenCodeStatus {
+  installed: boolean;
+  configDir: string;
+  pluginPath: string;
+  hookReady: boolean;
+  appDetected: boolean;
+}
+
+export interface OpenCodePreview {
+  diff: string;
+  backup: string;
+  pluginPath: string;
   fingerprint: string;
 }
 
