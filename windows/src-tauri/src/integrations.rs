@@ -81,38 +81,154 @@ fn enabled(app: &AppHandle, id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// What one poll cycle reports back to the spawn loop, so it can back off.
+pub enum PollOutcome {
+    /// Endpoint answered, whatever the body said. Normal cadence.
+    Ok,
+    /// Request never completed: network down, DNS, timeout. Back off.
+    Unreachable,
+    /// Endpoint answered but the answer was unusable. Back off less.
+    Malformed,
+}
+
+/// Backoff for a failing poller: the base interval doubled on every
+/// consecutive failure, capped, with ±25% jitter so seven integrations
+/// retrying after a network blip don't all fire on the same tick.
+fn backoff_secs(base_secs: u64, failures: u32) -> u64 {
+    let exp = base_secs.saturating_mul(2u64.saturating_pow(failures.min(6)));
+    let capped = exp.min(base_secs.saturating_mul(10));
+    // +0..24% jitter, computed so it cannot overflow even for huge bases:
+    // (capped / 100) * 24 stays far below u64::MAX, then saturating_add.
+    if capped > 2 {
+        let pct = pseudo_random_percent();
+        capped.saturating_add(capped / 100 * pct)
+    } else {
+        capped
+    }
+    .max(base_secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_with_consecutive_failures() {
+        let base = 30;
+        // first failure doubles the interval, jitter adds up to 24% on top
+        assert!(backoff_secs(base, 1) >= base * 2);
+        assert!(backoff_secs(base, 1) <= base * 2 + base * 2 / 100 * 24);
+        assert!(backoff_secs(base, 2) >= base * 4);
+    }
+
+    #[test]
+    fn backoff_never_falls_below_the_base_interval() {
+        for failures in 0..=8 {
+            assert!(backoff_secs(15, failures) >= 15);
+            assert!(backoff_secs(300, failures) >= 300);
+        }
+    }
+
+    #[test]
+    fn backoff_caps_at_ten_times_the_base() {
+        // 2^6 doublings would be 19200 s for base 300; the cap is 3000 (+jitter).
+        for failures in 4..=20 {
+            let cap = 300 * 10;
+            let got = backoff_secs(300, failures);
+            assert!(got >= cap, "below cap: {got}");
+            // jitter adds at most 24%
+            assert!(got <= cap + cap * 24 / 100, "above jitter headroom: {got}");
+        }
+    }
+
+    #[test]
+    fn backoff_overflows_instead_of_panicking() {
+        // A naive `capped * pct` would overflow for huge bases; saturating
+        // math must stay finite and >= base.
+        let got = backoff_secs(u64::MAX, 5);
+        assert_eq!(got, u64::MAX);
+        let got = backoff_secs(u64::MAX / 2, 9);
+        assert!(got >= u64::MAX / 2);
+    }
+
+    #[test]
+    fn pseudo_random_percent_stays_in_range() {
+        for _ in 0..1000 {
+            let v = pseudo_random_percent();
+            assert!(v < 25, "out of range: {v}");
+        }
+    }
+}
+
+/// A cheap PRNG (xorshift64) instead of a rand dependency: only the spread
+/// matters, not the quality. Seeded from the clock on first use.
+fn pseudo_random_percent() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEED: AtomicU64 = AtomicU64::new(0);
+    let mut x = SEED
+        .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+        .unwrap_or_else(|clock| clock);
+    if x == 1 {
+        x = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E3779B97F4A7C15);
+    }
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    SEED.store(x, Ordering::Relaxed);
+    x % 25 // 0..24, roughly ±12% around the midpoint
+}
+
 fn spawn<F, Fut>(app: AppHandle, id: &'static str, delay_secs: u64, every_secs: u64, poll: F)
 where
     F: Fn(AppHandle) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send,
+    Fut: std::future::Future<Output = PollOutcome> + Send,
 {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(delay_secs)).await;
-        let mut ticker = tokio::time::interval(Duration::from_secs(every_secs));
+        let mut failures: u32 = 0;
+        // A poll is skipped when paused/disabled and the ticker keeps its
+        // cadence, but a backoff overrides the ticker entirely: we sleep
+        // the computed delay, not the fixed interval.
         loop {
-            ticker.tick().await;
             // The ticker keeps its cadence; we just decline to do the work. An
             // integration the user switched off, or a paused app, must make no
             // network calls at all — CLAUDE.md allows talking only to services
             // the user configured, and a disabled one is not configured.
             if PAUSED.load(Ordering::Relaxed) || !enabled(&app, id) {
+                tokio::time::sleep(Duration::from_secs(every_secs)).await;
                 continue;
             }
-            poll(app.clone()).await;
+            let outcome = poll(app.clone()).await;
+            match outcome {
+                PollOutcome::Ok => failures = 0,
+                PollOutcome::Unreachable => failures = failures.saturating_add(1),
+                PollOutcome::Malformed => failures = failures.saturating_add(1),
+            }
+            let wait = if failures == 0 {
+                every_secs
+            } else {
+                backoff_secs(every_secs, failures)
+            };
+            tokio::time::sleep(Duration::from_secs(wait)).await;
         }
     });
 }
 
 /// One-shot refresh from the Refresh buttons in the island.
 pub async fn poll_once(app: AppHandle, id: &str) {
+    // The one-shot path ignores the outcome: the user asked for a refresh,
+    // so the result (or error) lands in the island either way.
     match id {
-        "integration_stripe" => poll_stripe(app).await,
-        "integration_github" => poll_github(app).await,
-        "integration_vercel" => poll_vercel(app).await,
-        "integration_n8n" => poll_n8n(app).await,
-        "integration_resend" => poll_resend(app).await,
-        "integration_notion" => poll_notion(app).await,
-        "integration_calcom" => poll_calcom(app).await,
+        "integration_stripe" => { poll_stripe(app).await; }
+        "integration_github" => { poll_github(app).await; }
+        "integration_vercel" => { poll_vercel(app).await; }
+        "integration_n8n" => { poll_n8n(app).await; }
+        "integration_resend" => { poll_resend(app).await; }
+        "integration_notion" => { poll_notion(app).await; }
+        "integration_calcom" => { poll_calcom(app).await; }
         _ => {}
     }
 }
@@ -143,8 +259,9 @@ fn status_error(code: u16, unauthorised_hint: &str) -> String {
 
 // ── Stripe ────────────────────────────────────────────────────────────────────
 
-async fn poll_stripe(app: AppHandle) {
-    let Some(key) = secrets::get("stripe-api-key") else { return };
+async fn poll_stripe(app: AppHandle) -> PollOutcome {
+    // Not configured: no request was made, so neither success nor failure.
+    let Some(key) = secrets::get("stripe-api-key") else { return PollOutcome::Ok };
     let auth = format!("Basic {}", crate::claude::base64_for(format!("{key}:").as_bytes()));
     let http = client();
 
@@ -183,7 +300,7 @@ async fn poll_stripe(app: AppHandle) {
                 error: Some(status_error(code, "Use a secret key (sk_live_… not pk_live_…)")),
                 event: None,
             });
-            return;
+            return PollOutcome::Malformed;
         }
         Err(e) => {
             emit(&app, IntegrationUpdate {
@@ -192,7 +309,7 @@ async fn poll_stripe(app: AppHandle) {
                 error: Some(format!("No connection: {e}")),
                 event: None,
             });
-            return;
+            return PollOutcome::Unreachable;
         }
     };
 
@@ -201,11 +318,15 @@ async fn poll_stripe(app: AppHandle) {
         .header("Authorization", &auth)
         .send()
         .await;
-    let Ok(response) = charges else { return };
+    let Ok(response) = charges else { return PollOutcome::Unreachable };
     if !response.status().is_success() {
-        return;
+        // The balance already landed; the payment list is supplementary, so a
+        // bad second call is not worth an error card — but not a clean cycle.
+        return PollOutcome::Malformed;
     }
-    let json: Value = response.json().await.unwrap_or(json!({}));
+    let Ok(json): Result<Value, _> = response.json().await else {
+        return PollOutcome::Malformed;
+    };
     let payments: Vec<Value> = json
         .get("data")
         .and_then(Value::as_array)
@@ -260,12 +381,14 @@ async fn poll_stripe(app: AppHandle) {
         error: None,
         event,
     });
+    PollOutcome::Ok
 }
 
 // ── GitHub ────────────────────────────────────────────────────────────────────
 
-async fn poll_github(app: AppHandle) {
-    let Some(token) = secrets::get("github-token") else { return };
+async fn poll_github(app: AppHandle) -> PollOutcome {
+    // Not configured: no request was made, so neither success nor failure.
+    let Some(token) = secrets::get("github-token") else { return PollOutcome::Ok };
     let http = client();
 
     let user = http
@@ -275,7 +398,7 @@ async fn poll_github(app: AppHandle) {
         .header("User-Agent", "Coucou")
         .send()
         .await;
-    let Ok(response) = user else { return };
+    let Ok(response) = user else { return PollOutcome::Unreachable };
     if !response.status().is_success() {
         emit(&app, IntegrationUpdate {
             id: "integration_github",
@@ -283,7 +406,7 @@ async fn poll_github(app: AppHandle) {
             error: Some(status_error(response.status().as_u16(), "Token lacks the needed scope")),
             event: None,
         });
-        return;
+        return PollOutcome::Malformed;
     }
     let json: Value = response.json().await.unwrap_or(json!({}));
     let public = json.get("public_repos").and_then(Value::as_i64).unwrap_or(0);
@@ -321,19 +444,21 @@ async fn poll_github(app: AppHandle) {
         error: None,
         event: None,
     });
+    PollOutcome::Ok
 }
 
 // ── Vercel ────────────────────────────────────────────────────────────────────
 
-async fn poll_vercel(app: AppHandle) {
-    let Some(token) = secrets::get("vercel-token") else { return };
+async fn poll_vercel(app: AppHandle) -> PollOutcome {
+    // Not configured: no request was made, so neither success nor failure.
+    let Some(token) = secrets::get("vercel-token") else { return PollOutcome::Ok };
     let response = client()
         .get("https://api.vercel.com/v6/deployments?limit=5")
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/json")
         .send()
         .await;
-    let Ok(response) = response else { return };
+    let Ok(response) = response else { return PollOutcome::Unreachable };
     if !response.status().is_success() {
         emit(&app, IntegrationUpdate {
             id: "integration_vercel",
@@ -341,7 +466,7 @@ async fn poll_vercel(app: AppHandle) {
             error: Some(status_error(response.status().as_u16(), "Token lacks access")),
             event: None,
         });
-        return;
+        return PollOutcome::Malformed;
     }
     let json: Value = response.json().await.unwrap_or(json!({}));
     let terminal = ["READY", "ERROR", "CANCELED"];
@@ -393,19 +518,21 @@ async fn poll_vercel(app: AppHandle) {
         error: None,
         event,
     });
+    PollOutcome::Ok
 }
 
 // ── Resend ────────────────────────────────────────────────────────────────────
 
-async fn poll_resend(app: AppHandle) {
-    let Some(key) = secrets::get("resend-api-key") else { return };
+async fn poll_resend(app: AppHandle) -> PollOutcome {
+    // Not configured: no request was made, so neither success nor failure.
+    let Some(key) = secrets::get("resend-api-key") else { return PollOutcome::Ok };
     let response = client()
         .get("https://api.resend.com/emails?limit=100")
         .header("Authorization", format!("Bearer {key}"))
         .header("Accept", "application/json")
         .send()
         .await;
-    let Ok(response) = response else { return };
+    let Ok(response) = response else { return PollOutcome::Unreachable };
     if !response.status().is_success() {
         emit(&app, IntegrationUpdate {
             id: "integration_resend",
@@ -413,7 +540,7 @@ async fn poll_resend(app: AppHandle) {
             error: Some(status_error(response.status().as_u16(), "Key lacks access")),
             event: None,
         });
-        return;
+        return PollOutcome::Malformed;
     }
     let json: Value = response.json().await.unwrap_or(json!({}));
     let total = json
@@ -450,12 +577,14 @@ async fn poll_resend(app: AppHandle) {
         error: None,
         event: None,
     });
+    PollOutcome::Ok
 }
 
 // ── Notion ────────────────────────────────────────────────────────────────────
 
-async fn poll_notion(app: AppHandle) {
-    let Some(token) = secrets::get("notion-api-key") else { return };
+async fn poll_notion(app: AppHandle) -> PollOutcome {
+    // Not configured: no request was made, so neither success nor failure.
+    let Some(token) = secrets::get("notion-api-key") else { return PollOutcome::Ok };
     let response = client()
         .post("https://api.notion.com/v1/search")
         .header("Authorization", format!("Bearer {token}"))
@@ -467,7 +596,7 @@ async fn poll_notion(app: AppHandle) {
         }))
         .send()
         .await;
-    let Ok(response) = response else { return };
+    let Ok(response) = response else { return PollOutcome::Unreachable };
     if !response.status().is_success() {
         emit(&app, IntegrationUpdate {
             id: "integration_notion",
@@ -475,7 +604,7 @@ async fn poll_notion(app: AppHandle) {
             error: Some(status_error(response.status().as_u16(), "Integration lacks access")),
             event: None,
         });
-        return;
+        return PollOutcome::Malformed;
     }
     let json: Value = response.json().await.unwrap_or(json!({}));
     let pages: Vec<Value> = json
@@ -490,6 +619,7 @@ async fn poll_notion(app: AppHandle) {
         error: None,
         event: None,
     });
+    PollOutcome::Ok
 }
 
 fn parse_notion_page(obj: &Value) -> Option<Value> {
@@ -546,15 +676,16 @@ fn parse_notion_page(obj: &Value) -> Option<Value> {
 
 // ── Cal.com ───────────────────────────────────────────────────────────────────
 
-async fn poll_calcom(app: AppHandle) {
-    let Some(key) = secrets::get("calcom-api-key") else { return };
+async fn poll_calcom(app: AppHandle) -> PollOutcome {
+    // Not configured: no request was made, so neither success nor failure.
+    let Some(key) = secrets::get("calcom-api-key") else { return PollOutcome::Ok };
     let response = client()
         .get("https://api.cal.com/v2/bookings?status=upcoming")
         .header("Authorization", format!("Bearer {key}"))
         .header("cal-api-version", "2024-08-13")
         .send()
         .await;
-    let Ok(response) = response else { return };
+    let Ok(response) = response else { return PollOutcome::Unreachable };
     if !response.status().is_success() {
         emit(&app, IntegrationUpdate {
             id: "integration_calcom",
@@ -562,7 +693,7 @@ async fn poll_calcom(app: AppHandle) {
             error: Some(status_error(response.status().as_u16(), "Key lacks access")),
             event: None,
         });
-        return;
+        return PollOutcome::Malformed;
     }
     let json: Value = response.json().await.unwrap_or(json!({}));
     let bookings: Vec<Value> = json
@@ -603,13 +734,15 @@ async fn poll_calcom(app: AppHandle) {
         error: None,
         event: None,
     });
+    PollOutcome::Ok
 }
 
 // ── n8n ───────────────────────────────────────────────────────────────────────
 
-async fn poll_n8n(app: AppHandle) {
+async fn poll_n8n(app: AppHandle) -> PollOutcome {
     let (Some(key), Some(raw_base)) = (secrets::get("n8n-api-key"), secrets::get("n8n-url")) else {
-        return;
+        // Not configured: no request was made, so neither success nor failure.
+        return PollOutcome::Ok;
     };
     let base = raw_base.trim_end_matches('/').to_string();
     let http = client();
@@ -621,11 +754,13 @@ async fn poll_n8n(app: AppHandle) {
     ];
 
     let mut items: Option<Vec<Value>> = None;
+    let mut unreachable = true;
     for url in &list_urls {
-        let Ok(response) = http.get(url).header("X-N8N-API-KEY", &key).header("Accept", "application/json").send().await
-        else {
+        let response = http.get(url).header("X-N8N-API-KEY", &key).header("Accept", "application/json").send().await;
+        let Ok(response) = response else {
             continue;
         };
+        unreachable = false;
         if !response.status().is_success() {
             // Only the status: a self-hosted base URL can carry credentials.
             log::line(format!("n8n list HTTP {}", response.status()));
@@ -642,19 +777,21 @@ async fn poll_n8n(app: AppHandle) {
         }
     }
 
-    let Some(first) = items.and_then(|list| list.into_iter().next()) else { return };
+    let Some(first) = items.and_then(|list| list.into_iter().next()) else {
+        return if unreachable { PollOutcome::Unreachable } else { PollOutcome::Malformed };
+    };
     let id = match first.get("id") {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
-        _ => return,
+        _ => return PollOutcome::Malformed,
     };
 
     let status = first.get("status").and_then(Value::as_str).unwrap_or("");
     if !["success", "error", "crashed", "canceled", "failed"].contains(&status) {
-        return;
+        return PollOutcome::Ok;
     }
     if !is_new("n8n", &id) {
-        return;
+        return PollOutcome::Ok;
     }
     let success = status == "success";
 
@@ -693,6 +830,7 @@ async fn poll_n8n(app: AppHandle) {
         error: None,
         event: Some(IntegrationEvent { success, label: name, detail }),
     });
+    PollOutcome::Ok
 }
 
 fn n8n_detail(json: &Value, success: bool) -> Option<String> {
