@@ -170,6 +170,11 @@ problems. It stays on your machine.
   the top edge instead of hiding in a notch.
 - Permission approval works from **any** terminal; the Mac build only listens to
   VS Code sessions.
+- Permission requests also show up as **Windows toasts with Allow / Deny
+  buttons**, so you can answer without opening the island.
+- **OpenCode** is supported here first — not yet on the Mac. Install the plugin
+  from Settings → OpenCode; sessions get their own pill and approvals work from
+  the island or the toast.
 - Not in this version: sending a file by email, dragging Mochi onto a window to
   attach it as context, and jumping to a specific terminal window — "Open
   terminal" opens the working folder in VS Code when `code` is on your `PATH`.
